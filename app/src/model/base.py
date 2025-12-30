@@ -1,7 +1,7 @@
 from humps import decamelize
 from sqlalchemy import MetaData
 from sqlalchemy.orm import DeclarativeBase, declared_attr
-from src.config import db_config
+from src.database.config import db_config
 
 
 class Base(DeclarativeBase):
