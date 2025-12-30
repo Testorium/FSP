@@ -4,7 +4,7 @@ set -e
 
 echo "Run apply migrations.."
 
-# alembic upgrade head
+alembic upgrade head
 
 if [ $? -ne 0 ]; then
     echo "Failed to apply migrations"
