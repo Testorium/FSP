@@ -1,9 +1,19 @@
+# TODO: add
+# update()
+# update_many()
+# count()
+# upsert()
+# upsert_many()
+# exists()
+# delete()
+# delete_many()
+# delete_where()
+
 from collections.abc import Iterable
-from typing import Any, List, Literal, Optional, Type, cast
+from typing import Any, List, Literal, Optional, Sequence, Type, cast
 
 from sqlalchemy import Result, Select, UnaryExpression, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.selectable import ForUpdateParameter
 
 from .constants import DEFAULT_ERROR_MESSAGE_TEMPLATES
@@ -47,8 +57,16 @@ class BaseRepository[ModelT]:
             await self.session.commit() if auto_commit else await self.session.flush()
         )
 
-    async def _execute(self, statement: Select[Any]) -> Result[Any]:
+    async def _execute(
+        self,
+        statement: Select[Any],
+        uniquify: bool = False,
+    ) -> Result[Any]:
         result = await self.session.execute(statement)
+
+        if uniquify:
+            result = result.unique()
+
         return result
 
     async def _attach_to_session(
@@ -85,21 +103,6 @@ class BaseRepository[ModelT]:
             else None
         )
 
-    @staticmethod
-    def _get_error_messages(
-        error_messages: Optional[ErrorMessages | None] = None,
-        default_messages: Optional[ErrorMessages | None] = None,
-    ) -> ErrorMessages:
-        messages = cast("ErrorMessages", dict(DEFAULT_ERROR_MESSAGE_TEMPLATES))
-
-        if default_messages:
-            messages.update(default_messages)
-
-        if error_messages:
-            messages.update(error_messages)
-
-        return messages
-
     async def add(
         self,
         data: ModelT,
@@ -118,31 +121,32 @@ class BaseRepository[ModelT]:
             await self._refresh(instance, auto_refresh=auto_refresh)
             return instance
 
-    @staticmethod
-    def check_not_found(item_or_none: Optional[ModelT]) -> ModelT:
-        if item_or_none is None:
-            msg = "No item found when one was expected"
-            raise NotFoundError(msg)
-        return item_or_none
-
-    @staticmethod
-    def get_instrumented_attr(
-        model: ModelT,
-        key: str | InstrumentedAttribute[Any],
-    ) -> InstrumentedAttribute[Any]:
-        if isinstance(key, str):
-            return cast("InstrumentedAttribute[Any]", getattr(model, key))
-        return key
+    async def add_many(
+        self,
+        data: List[ModelT],
+        *,
+        auto_commit: Optional[bool] = None,
+        error_messages: Optional[ErrorMessages | None] = None,
+    ) -> Sequence[ModelT]:
+        error_messages = self._get_error_messages(
+            error_messages=error_messages,
+            default_messages=self.error_messages,
+        )
+        with wrap_sqlalchemy_exception(error_messages=error_messages):
+            self.session.add_all(data)
+            await self._flush_or_commit(auto_commit=auto_commit)
+            return data
 
     async def list(
         self,
-        error_messages: Optional[ErrorMessages | None] = None,
-        order_by: Iterable[OrderByExpr] | None = None,
+        uniquify: Optional[bool] = None,
         load_options: Optional[LoadOptions] = None,
-        # execution_options: Optional[dict[str, Any]] = None,
-        # uniquify: Optional[bool] = None,
+        order_by: Iterable[OrderByExpr] | None = None,
+        error_messages: Optional[ErrorMessages | None] = None,
         **kwargs: Any,
-    ) -> List[ModelT]:
+    ) -> Sequence[ModelT]:
+        # TODO: apply pagination filters
+
         error_messages = self._get_error_messages(
             error_messages=error_messages,
             default_messages=self.error_messages,
@@ -156,9 +160,56 @@ class BaseRepository[ModelT]:
             statement = self._apply_order_by(statement=statement, order_by=order_by)
             statement = self._apply_select_filters_by_kwargs(statement, **kwargs)
             statement = self._apply_load_options(statement, load_options)
-            result = await self._execute(statement)
+            result = await self._execute(statement, uniquify=uniquify)
             instances = result.scalars().all()
-            return cast("list[ModelT]", instances)
+            return instances
+
+    async def get_one(
+        self,
+        uniquify: Optional[bool] = None,
+        load_options: Optional[LoadOptions] = None,
+        error_messages: Optional[ErrorMessages | None] = None,
+        **kwargs: Any,
+    ) -> ModelT:
+        error_messages = self._get_error_messages(
+            error_messages=error_messages,
+            default_messages=self.error_messages,
+        )
+        with wrap_sqlalchemy_exception(error_messages=error_messages):
+            statement = select(self.model)
+
+            statement = self._apply_select_filters_by_kwargs(statement, **kwargs)
+            statement = self._apply_load_options(statement, load_options)
+
+            instance = (
+                await self._execute(statement, uniquify=uniquify)
+            ).scalar_one_or_none()
+            instance = self.check_not_found(instance)
+            return instance
+
+    async def get_one_or_none(
+        self,
+        uniquify: Optional[bool] = None,
+        load_options: Optional[LoadOptions] = None,
+        error_messages: Optional[ErrorMessages | None] = None,
+        **kwargs: Any,
+    ) -> ModelT | None:
+        error_messages = self._get_error_messages(
+            error_messages=error_messages,
+            default_messages=self.error_messages,
+        )
+        with wrap_sqlalchemy_exception(error_messages=error_messages):
+            statement = select(self.model)
+
+            statement = self._apply_select_filters_by_kwargs(statement, **kwargs)
+            statement = self._apply_load_options(statement, load_options)
+
+            instance = cast(
+                "Result[tuple[ModelT]]",
+                (await self._execute(statement, uniquify=uniquify)),
+            ).scalar_one_or_none()
+
+            return instance
 
     # @staticmethod
     # def _apply_pagination_filters(
@@ -166,6 +217,37 @@ class BaseRepository[ModelT]:
     #     **filters: Any,
     # ) -> StatementTypeT:
     #     pass
+
+    @staticmethod
+    def check_not_found(item_or_none: Optional[ModelT]) -> ModelT:
+        if item_or_none is None:
+            msg = "No item found when one was expected"
+            raise NotFoundError(msg)
+        return item_or_none
+
+    # @staticmethod
+    # def _get_instrumented_attr(
+    #     model: ModelT,
+    #     key: str | InstrumentedAttribute[Any],
+    # ) -> InstrumentedAttribute[Any]:
+    #     if isinstance(key, str):
+    #         return cast("InstrumentedAttribute[Any]", getattr(model, key))
+    #     return key
+
+    @staticmethod
+    def _get_error_messages(
+        error_messages: Optional[ErrorMessages | None] = None,
+        default_messages: Optional[ErrorMessages | None] = None,
+    ) -> ErrorMessages:
+        messages = cast("ErrorMessages", dict(DEFAULT_ERROR_MESSAGE_TEMPLATES))
+
+        if default_messages:
+            messages.update(default_messages)
+
+        if error_messages:
+            messages.update(error_messages)
+
+        return messages
 
     @staticmethod
     def _apply_load_options(
