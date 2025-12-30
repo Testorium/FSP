@@ -8,9 +8,9 @@ services:
     env_file:
       - path: ./app/.env
         required: true
-    depends_on:
-      pg:
-        condition: service_healthy
+    # depends_on:
+    #   pg:
+    #     condition: service_healthy
 
     # volumes:
     #   - ./app:/app

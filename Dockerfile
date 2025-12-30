@@ -11,6 +11,7 @@ COPY ./app/requirements ./requirements
 
 RUN pip install -r requirements/dev.txt
 
+
 COPY ./app .
 
 RUN chmod +x ./prestart.sh
