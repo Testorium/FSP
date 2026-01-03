@@ -1,19 +1,20 @@
 # TODO: add
-# update()
-# update_many()
-# count()
 # upsert()
 # upsert_many()
-# exists()
 # delete()
 # delete_many()
 # delete_where()
 
-from collections.abc import Iterable
-from typing import Any, List, Literal, Optional, Sequence, Type, cast
+# TODO: add conditions to every method it can be added
 
-from sqlalchemy import Result, Select, UnaryExpression, select
+
+from collections.abc import Iterable
+from typing import Any, List, Literal, Optional, Sequence, Type, Union, cast
+
+from sqlalchemy import ColumnElement, Result, Select, UnaryExpression, func, select
+from sqlalchemy import exists as sql_exists
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.selectable import ForUpdateParameter
 
 from .constants import DEFAULT_ERROR_MESSAGE_TEMPLATES
@@ -109,6 +110,7 @@ class BaseRepository[ModelT]:
         *,
         auto_commit: Optional[bool] = None,
         auto_refresh: Optional[bool] = None,
+        attribute_names: Optional[Iterable[str]] = None,
         error_messages: Optional[ErrorMessages | None] = None,
     ) -> ModelT:
         error_messages = self._get_error_messages(
@@ -118,7 +120,11 @@ class BaseRepository[ModelT]:
         with wrap_sqlalchemy_exception(error_messages=error_messages):
             instance = await self._attach_to_session(data)
             await self._flush_or_commit(auto_commit=auto_commit)
-            await self._refresh(instance, auto_refresh=auto_refresh)
+            await self._refresh(
+                instance,
+                attribute_names=attribute_names,
+                auto_refresh=auto_refresh,
+            )
             return instance
 
     async def add_many(
@@ -211,6 +217,110 @@ class BaseRepository[ModelT]:
 
             return instance
 
+    async def update(
+        self,
+        instance: ModelT,
+        *,
+        auto_commit: Optional[bool] = None,
+        auto_refresh: Optional[bool] = None,
+        attribute_names: Optional[Iterable[str]] = None,
+        with_for_update: ForUpdateParameter = None,
+        error_messages: Optional[ErrorMessages | None] = None,
+    ) -> ModelT:
+        error_messages = self._get_error_messages(
+            error_messages=error_messages,
+            default_messages=self.error_messages,
+        )
+        with wrap_sqlalchemy_exception(error_messages=error_messages):
+            instance = await self._attach_to_session(
+                instance,
+                strategy="merge",
+            )
+
+            await self._flush_or_commit(auto_commit=auto_commit)
+            await self._refresh(
+                instance,
+                attribute_names=attribute_names,
+                with_for_update=with_for_update,
+                auto_refresh=auto_refresh,
+            )
+            return instance
+
+    async def update_many(
+        self,
+        instances: Iterable[ModelT],
+        *,
+        auto_commit: Optional[bool] = None,
+        auto_refresh: Optional[bool] = None,
+        attribute_names: Optional[Iterable[str]] = None,
+        with_for_update: ForUpdateParameter = None,
+        error_messages: Optional[ErrorMessages | None] = None,
+    ) -> Sequence[ModelT]:
+        error_messages = self._get_error_messages(
+            error_messages=error_messages,
+            default_messages=self.error_messages,
+        )
+
+        with wrap_sqlalchemy_exception(error_messages=error_messages):
+            merged_instances: list[ModelT] = []
+
+            for instance in instances:
+                merged = await self._attach_to_session(
+                    instance,
+                    strategy="merge",
+                )
+                merged_instances.append(merged)
+
+            await self._flush_or_commit(auto_commit=auto_commit)
+
+            for instance in merged_instances:
+                await self._refresh(
+                    instance,
+                    attribute_names=attribute_names,
+                    with_for_update=with_for_update,
+                    auto_refresh=auto_refresh,
+                )
+
+            return merged_instances
+
+    async def count(
+        self,
+        conditions: Optional[Iterable[ColumnElement[bool]]] = None,
+        error_messages: Optional[ErrorMessages] = None,
+        **kwargs: Any,
+    ) -> int:
+        error_messages = self._get_error_messages(
+            error_messages=error_messages,
+            default_messages=self.error_messages,
+        )
+
+        with wrap_sqlalchemy_exception(error_messages=error_messages):
+            statement = select(func.count()).select_from(self.model)
+            statement = self._apply_conditions(statement, conditions)
+            statement = self._apply_select_filters_by_kwargs(statement, **kwargs)
+
+            result = await self._execute(statement)
+            return result.scalar_one()
+
+    async def exists(
+        self,
+        conditions: Optional[Iterable[ColumnElement[bool]]] = None,
+        error_messages: Optional[ErrorMessages | None] = None,
+    ) -> bool:
+        error_messages = self._get_error_messages(
+            error_messages=error_messages,
+            default_messages=self.error_messages,
+        )
+
+        with wrap_sqlalchemy_exception(error_messages=error_messages):
+            subquery = select(1).select_from(self.model)
+            subquery = self._apply_conditions(subquery, conditions)
+
+            statement = select(sql_exists(subquery))
+
+            result = await self.session.execute(statement)
+            return bool(result.scalar())
+
     # @staticmethod
     # def _apply_pagination_filters(
     #     statement: StatementTypeT,
@@ -233,6 +343,16 @@ class BaseRepository[ModelT]:
     #     if isinstance(key, str):
     #         return cast("InstrumentedAttribute[Any]", getattr(model, key))
     #     return key
+
+    @staticmethod
+    def _apply_conditions(
+        statement: StatementTypeT,
+        conditions: Iterable[ColumnElement[bool]] | None,
+    ) -> StatementTypeT:
+        if not conditions:
+            return statement
+
+        return statement.where(*conditions)
 
     @staticmethod
     def _get_error_messages(
@@ -282,3 +402,15 @@ class BaseRepository[ModelT]:
             else:
                 statement = statement.order_by(order_field.asc())
         return statement
+
+    @classmethod
+    def get_id_attribute_value(
+        cls,
+        item: Union[ModelT, type[ModelT]],
+        id_attribute: Optional[Union[str, InstrumentedAttribute[Any]]] = None,
+    ) -> Any:
+        if isinstance(id_attribute, InstrumentedAttribute):
+            id_attribute = id_attribute.key
+        return getattr(
+            item, id_attribute if id_attribute is not None else cls.id_attribute
+        )
